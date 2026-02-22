@@ -180,6 +180,467 @@ func TestDocsDelete_SendsExpectedRequest(t *testing.T) {
 	}
 }
 
+func TestDocsAddTab_SendsExpectedRequest(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	var got docs.BatchUpdateDocumentRequest
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchUpdate") {
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode batchUpdate: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"documentId": "doc1",
+				"replies": []any{map[string]any{
+					"addDocumentTab": map[string]any{
+						"tabProperties": map[string]any{
+							"tabId": "t.new",
+							"title": "Notes",
+							"index": 1,
+						},
+					},
+				}},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com"}
+	cmd := &DocsAddTabCmd{}
+	if err := runKong(t, cmd, []string{"doc1", "--title", "Notes", "--index", "1"}, newDocsCmdContext(t), flags); err != nil {
+		t.Fatalf("docs add-tab: %v", err)
+	}
+
+	if len(got.Requests) != 1 || got.Requests[0].AddDocumentTab == nil {
+		t.Fatalf("unexpected request payload: %#v", got.Requests)
+	}
+	req := got.Requests[0].AddDocumentTab
+	if req.TabProperties == nil || req.TabProperties.Title != "Notes" {
+		t.Fatalf("unexpected tab properties: %#v", req.TabProperties)
+	}
+}
+
+func TestDocsAddTab_WithParentAndEmoji(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	var got docs.BatchUpdateDocumentRequest
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchUpdate") {
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode batchUpdate: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"documentId": "doc1",
+				"replies": []any{map[string]any{
+					"addDocumentTab": map[string]any{
+						"tabProperties": map[string]any{
+							"tabId":       "t.child",
+							"title":       "Sub Tab",
+							"index":       0,
+							"parentTabId": "t.parent",
+						},
+					},
+				}},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com"}
+	cmd := &DocsAddTabCmd{}
+	if err := runKong(t, cmd, []string{"doc1", "--title", "Sub Tab", "--parent", "t.parent", "--emoji", "📝"}, newDocsCmdContext(t), flags); err != nil {
+		t.Fatalf("docs add-tab: %v", err)
+	}
+
+	if len(got.Requests) != 1 || got.Requests[0].AddDocumentTab == nil {
+		t.Fatalf("unexpected request payload: %#v", got.Requests)
+	}
+	props := got.Requests[0].AddDocumentTab.TabProperties
+	if props == nil {
+		t.Fatal("expected tab properties")
+	}
+	if props.Title != "Sub Tab" {
+		t.Fatalf("expected title 'Sub Tab', got %q", props.Title)
+	}
+	if props.ParentTabId != "t.parent" {
+		t.Fatalf("expected parentTabId 't.parent', got %q", props.ParentTabId)
+	}
+	if props.IconEmoji != "📝" {
+		t.Fatalf("expected emoji '📝', got %q", props.IconEmoji)
+	}
+}
+
+func TestDocsUpdateTab_SendsExpectedRequest(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	var got docs.BatchUpdateDocumentRequest
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchUpdate") {
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode batchUpdate: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"documentId": "doc1"})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com"}
+	cmd := &DocsUpdateTabCmd{}
+	if err := runKong(t, cmd, []string{"doc1", "t.abc", "--title", "Renamed"}, newDocsCmdContext(t), flags); err != nil {
+		t.Fatalf("docs update-tab: %v", err)
+	}
+
+	if len(got.Requests) != 1 || got.Requests[0].UpdateDocumentTabProperties == nil {
+		t.Fatalf("unexpected request payload: %#v", got.Requests)
+	}
+	req := got.Requests[0].UpdateDocumentTabProperties
+	if req.TabProperties == nil || req.TabProperties.TabId != "t.abc" || req.TabProperties.Title != "Renamed" {
+		t.Fatalf("unexpected update payload: %#v", req.TabProperties)
+	}
+	if req.Fields != "title" {
+		t.Fatalf("expected fields 'title', got %q", req.Fields)
+	}
+}
+
+func TestDocsUpdateTab_RequiresFlag(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com"}
+	cmd := &DocsUpdateTabCmd{}
+	err := runKong(t, cmd, []string{"doc1", "t.abc"}, newDocsCmdContext(t), flags)
+	if err == nil {
+		t.Fatal("expected error when no flags provided")
+	}
+	if !strings.Contains(err.Error(), "--title, --emoji, or --index") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDocsDeleteTab_SendsExpectedRequest(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	var got docs.BatchUpdateDocumentRequest
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchUpdate") {
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode batchUpdate: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"documentId": "doc1"})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com", Force: true}
+	cmd := &DocsDeleteTabCmd{}
+	if err := runKong(t, cmd, []string{"doc1", "t.abc"}, newDocsCmdContext(t), flags); err != nil {
+		t.Fatalf("docs delete-tab: %v", err)
+	}
+
+	if len(got.Requests) != 1 || got.Requests[0].DeleteTab == nil {
+		t.Fatalf("unexpected request payload: %#v", got.Requests)
+	}
+	if got.Requests[0].DeleteTab.TabId != "t.abc" {
+		t.Fatalf("unexpected tab ID: %q", got.Requests[0].DeleteTab.TabId)
+	}
+}
+
+func tabsDocWithBody(id string) map[string]any {
+	return map[string]any{
+		"documentId": id,
+		"title":      "Tabbed Doc",
+		"tabs": []any{
+			map[string]any{
+				"tabProperties": map[string]any{
+					"tabId": "t.0",
+					"title": "Overview",
+					"index": 0,
+				},
+				"documentTab": map[string]any{
+					"body": map[string]any{
+						"content": []any{
+							map[string]any{
+								"startIndex": 0,
+								"endIndex":   1,
+								"sectionBreak": map[string]any{
+									"sectionStyle": map[string]any{},
+								},
+							},
+							map[string]any{
+								"startIndex": 1,
+								"endIndex":   14,
+								"paragraph": map[string]any{
+									"elements": []any{
+										map[string]any{
+											"startIndex": 1,
+											"endIndex":   14,
+											"textRun":    map[string]any{"content": "overview text"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			map[string]any{
+				"tabProperties": map[string]any{
+					"tabId": "t.notes",
+					"title": "Notes",
+					"index": 1,
+				},
+				"documentTab": map[string]any{
+					"body": map[string]any{
+						"content": []any{
+							map[string]any{
+								"startIndex": 0,
+								"endIndex":   1,
+								"sectionBreak": map[string]any{
+									"sectionStyle": map[string]any{},
+								},
+							},
+							map[string]any{
+								"startIndex": 1,
+								"endIndex":   12,
+								"paragraph": map[string]any{
+									"elements": []any{
+										map[string]any{
+											"startIndex": 1,
+											"endIndex":   12,
+											"textRun":    map[string]any{"content": "notes text\n"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestDocsWritePlainText_TabAppend(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	var gotBatch docs.BatchUpdateDocumentRequest
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/documents/"):
+			_ = json.NewEncoder(w).Encode(tabsDocWithBody("doc1"))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchUpdate"):
+			if err := json.NewDecoder(r.Body).Decode(&gotBatch); err != nil {
+				t.Fatalf("decode batchUpdate: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"documentId": "doc1"})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com"}
+	cmd := &DocsWriteCmd{}
+	if err := runKong(t, cmd, []string{"doc1", "appended", "--tab", "Notes"}, newDocsCmdContext(t), flags); err != nil {
+		t.Fatalf("docs write --tab: %v", err)
+	}
+
+	if len(gotBatch.Requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(gotBatch.Requests))
+	}
+	req := gotBatch.Requests[0]
+	if req.InsertText == nil {
+		t.Fatal("expected InsertText request")
+	}
+	if req.InsertText.Text != "appended" {
+		t.Fatalf("unexpected text: %q", req.InsertText.Text)
+	}
+	if req.InsertText.EndOfSegmentLocation == nil {
+		t.Fatal("expected EndOfSegmentLocation")
+	}
+	if req.InsertText.EndOfSegmentLocation.TabId != "t.notes" {
+		t.Fatalf("expected TabId 't.notes', got %q", req.InsertText.EndOfSegmentLocation.TabId)
+	}
+}
+
+func TestDocsWritePlainText_TabReplace(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	var gotBatch docs.BatchUpdateDocumentRequest
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/documents/"):
+			_ = json.NewEncoder(w).Encode(tabsDocWithBody("doc1"))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchUpdate"):
+			if err := json.NewDecoder(r.Body).Decode(&gotBatch); err != nil {
+				t.Fatalf("decode batchUpdate: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"documentId": "doc1"})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com"}
+	cmd := &DocsWriteCmd{}
+	if err := runKong(t, cmd, []string{"doc1", "replaced", "--tab", "Notes", "--replace"}, newDocsCmdContext(t), flags); err != nil {
+		t.Fatalf("docs write --tab --replace: %v", err)
+	}
+
+	if len(gotBatch.Requests) != 2 {
+		t.Fatalf("expected 2 requests (delete + insert), got %d", len(gotBatch.Requests))
+	}
+
+	// First request: delete existing content
+	del := gotBatch.Requests[0]
+	if del.DeleteContentRange == nil || del.DeleteContentRange.Range == nil {
+		t.Fatal("expected DeleteContentRange request")
+	}
+	if del.DeleteContentRange.Range.TabId != "t.notes" {
+		t.Fatalf("delete range TabId: expected 't.notes', got %q", del.DeleteContentRange.Range.TabId)
+	}
+	if del.DeleteContentRange.Range.StartIndex != 1 {
+		t.Fatalf("delete range StartIndex: expected 1, got %d", del.DeleteContentRange.Range.StartIndex)
+	}
+
+	// Second request: insert new content
+	ins := gotBatch.Requests[1]
+	if ins.InsertText == nil {
+		t.Fatal("expected InsertText request")
+	}
+	if ins.InsertText.Text != "replaced" {
+		t.Fatalf("unexpected text: %q", ins.InsertText.Text)
+	}
+	if ins.InsertText.EndOfSegmentLocation == nil || ins.InsertText.EndOfSegmentLocation.TabId != "t.notes" {
+		t.Fatal("expected EndOfSegmentLocation with TabId 't.notes'")
+	}
+}
+
+func TestDocsWriteMarkdown_TabReplace(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	var gotBatch docs.BatchUpdateDocumentRequest
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/documents/"):
+			_ = json.NewEncoder(w).Encode(tabsDocWithBody("doc1"))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchUpdate"):
+			if err := json.NewDecoder(r.Body).Decode(&gotBatch); err != nil {
+				t.Fatalf("decode batchUpdate: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"documentId": "doc1"})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com"}
+	cmd := &DocsWriteCmd{}
+	if err := runKong(t, cmd, []string{"doc1", "# Hello\n\nWorld", "--tab", "Notes", "--replace", "--markdown"}, newDocsCmdContext(t), flags); err != nil {
+		t.Fatalf("docs write --tab --replace --markdown: %v", err)
+	}
+
+	if len(gotBatch.Requests) < 2 {
+		t.Fatalf("expected at least 2 requests (delete + insert + formatting), got %d", len(gotBatch.Requests))
+	}
+
+	// First request: delete existing content
+	del := gotBatch.Requests[0]
+	if del.DeleteContentRange == nil || del.DeleteContentRange.Range == nil {
+		t.Fatal("expected DeleteContentRange request")
+	}
+	if del.DeleteContentRange.Range.TabId != "t.notes" {
+		t.Fatalf("delete range TabId: expected 't.notes', got %q", del.DeleteContentRange.Range.TabId)
+	}
+
+	// Second request: insert text
+	ins := gotBatch.Requests[1]
+	if ins.InsertText == nil || ins.InsertText.Location == nil {
+		t.Fatal("expected InsertText with Location")
+	}
+	if ins.InsertText.Location.TabId != "t.notes" {
+		t.Fatalf("insert Location TabId: expected 't.notes', got %q", ins.InsertText.Location.TabId)
+	}
+
+	// Formatting requests should also have TabId set
+	for i := 2; i < len(gotBatch.Requests); i++ {
+		req := gotBatch.Requests[i]
+		if req.UpdateParagraphStyle != nil && req.UpdateParagraphStyle.Range != nil {
+			if req.UpdateParagraphStyle.Range.TabId != "t.notes" {
+				t.Fatalf("formatting request %d: UpdateParagraphStyle Range TabId: expected 't.notes', got %q", i, req.UpdateParagraphStyle.Range.TabId)
+			}
+		}
+		if req.UpdateTextStyle != nil && req.UpdateTextStyle.Range != nil {
+			if req.UpdateTextStyle.Range.TabId != "t.notes" {
+				t.Fatalf("formatting request %d: UpdateTextStyle Range TabId: expected 't.notes', got %q", i, req.UpdateTextStyle.Range.TabId)
+			}
+		}
+	}
+}
+
+func TestDocsWrite_TabNotFound(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/documents/") {
+			_ = json.NewEncoder(w).Encode(tabsDocWithBody("doc1"))
+			return
+		}
+		http.NotFound(w, r)
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com"}
+	cmd := &DocsWriteCmd{}
+	err := runKong(t, cmd, []string{"doc1", "hello", "--tab", "NonExistent"}, newDocsCmdContext(t), flags)
+	if err == nil {
+		t.Fatal("expected error for non-existent tab")
+	}
+	if !strings.Contains(err.Error(), "tab not found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestDocsFindReplace_SendsExpectedRequest(t *testing.T) {
 	origDocs := newDocsService
 	t.Cleanup(func() { newDocsService = origDocs })
