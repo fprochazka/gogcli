@@ -11,12 +11,14 @@ import (
 type TableInserter struct {
 	svc   *docs.Service
 	docID string
+	tabID string
 }
 
-func NewTableInserter(svc *docs.Service, docID string) *TableInserter {
+func NewTableInserter(svc *docs.Service, docID, tabID string) *TableInserter {
 	return &TableInserter{
 		svc:   svc,
 		docID: docID,
+		tabID: tabID,
 	}
 }
 
@@ -37,6 +39,7 @@ func (ti *TableInserter) InsertNativeTable(ctx context.Context, tableIndex int64
 			Columns: cols,
 			Location: &docs.Location{
 				Index: tableIndex,
+				TabId: ti.tabID,
 			},
 		},
 	}
@@ -49,13 +52,13 @@ func (ti *TableInserter) InsertNativeTable(ctx context.Context, tableIndex int64
 	}
 
 	// Step 2: Fetch the document to get cell indices
-	doc, err := ti.svc.Documents.Get(ti.docID).Context(ctx).Do()
+	body, err := ti.getBody(ctx)
 	if err != nil {
 		return tableIndex, fmt.Errorf("get document after table insert: %w", err)
 	}
 
 	// Step 3: Find the table in the document and get cell indices
-	cellIndices, tableEndIndex, err := ti.getTableCellIndices(doc, tableIndex, rows, cols)
+	cellIndices, tableEndIndex, err := ti.getTableCellIndices(body, tableIndex, rows, cols)
 	if err != nil {
 		return tableEndIndex, err
 	}
@@ -78,6 +81,7 @@ func (ti *TableInserter) InsertNativeTable(ctx context.Context, tableIndex int64
 				InsertText: &docs.InsertTextRequest{
 					Location: &docs.Location{
 						Index: cellIdx,
+						TabId: ti.tabID,
 					},
 					Text: cellContent,
 				},
@@ -91,6 +95,7 @@ func (ti *TableInserter) InsertNativeTable(ctx context.Context, tableIndex int64
 						Range: &docs.Range{
 							StartIndex: cellIdx,
 							EndIndex:   cellIdx + utf16Len(cellContent),
+							TabId:      ti.tabID,
 						},
 						TextStyle: &docs.TextStyle{
 							Bold: true,
@@ -120,8 +125,29 @@ func (ti *TableInserter) InsertNativeTable(ctx context.Context, tableIndex int64
 	return tableEndIndex, nil
 }
 
+// getBody fetches the document and returns the body for the targeted tab.
+func (ti *TableInserter) getBody(ctx context.Context) (*docs.Body, error) {
+	call := ti.svc.Documents.Get(ti.docID)
+	if ti.tabID != "" {
+		call = call.IncludeTabsContent(true)
+	}
+	doc, err := call.Context(ctx).Do()
+	if err != nil {
+		return nil, err
+	}
+	if ti.tabID != "" {
+		for _, tab := range flattenTabs(doc.Tabs) {
+			if tab.TabProperties != nil && tab.TabProperties.TabId == ti.tabID && tab.DocumentTab != nil {
+				return tab.DocumentTab.Body, nil
+			}
+		}
+		return nil, fmt.Errorf("tab %s not found", ti.tabID)
+	}
+	return doc.Body, nil
+}
+
 // getTableCellIndices extracts the start index for each cell in a table
-func (ti *TableInserter) getTableCellIndices(doc *docs.Document, tableStartIndex int64, rows, cols int64) ([][]int64, int64, error) {
+func (ti *TableInserter) getTableCellIndices(body *docs.Body, tableStartIndex int64, rows, cols int64) ([][]int64, int64, error) {
 	cellIndices := make([][]int64, rows)
 	for i := range cellIndices {
 		cellIndices[i] = make([]int64, cols)
@@ -130,12 +156,12 @@ func (ti *TableInserter) getTableCellIndices(doc *docs.Document, tableStartIndex
 	var tableEndIndex int64
 
 	// Find the table in the document
-	if doc.Body == nil {
+	if body == nil {
 		return cellIndices, tableEndIndex, fmt.Errorf("document body is nil")
 	}
 
 	// Look for table element starting near tableStartIndex
-	for _, element := range doc.Body.Content {
+	for _, element := range body.Content {
 		if element.Table != nil {
 			// Check if this is our table (starts near the expected index)
 			if element.StartIndex >= tableStartIndex-2 && element.StartIndex <= tableStartIndex+2 {
