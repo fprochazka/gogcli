@@ -29,6 +29,9 @@ type DocsCmd struct {
 	Cat         DocsCatCmd         `cmd:"" name:"cat" aliases:"text,read" help:"Print a Google Doc as plain text"`
 	Comments    DocsCommentsCmd    `cmd:"" name:"comments" help:"Manage comments on a Google Doc"`
 	ListTabs    DocsListTabsCmd    `cmd:"" name:"list-tabs" help:"List all tabs in a Google Doc"`
+	AddTab      DocsAddTabCmd      `cmd:"" name:"add-tab" aliases:"create-tab" help:"Add a tab to a Google Doc"`
+	UpdateTab   DocsUpdateTabCmd   `cmd:"" name:"update-tab" aliases:"rename-tab" help:"Update tab properties in a Google Doc"`
+	DeleteTab   DocsDeleteTabCmd   `cmd:"" name:"delete-tab" aliases:"remove-tab,rm-tab" help:"Delete a tab from a Google Doc"`
 	Write       DocsWriteCmd       `cmd:"" name:"write" help:"Write content to a Google Doc"`
 	Insert      DocsInsertCmd      `cmd:"" name:"insert" help:"Insert text at a specific position"`
 	Delete      DocsDeleteCmd      `cmd:"" name:"delete" help:"Delete text range from document"`
@@ -611,6 +614,225 @@ func (c *DocsListTabsCmd) Run(ctx context.Context, flags *RootFlags) error {
 			)
 		}
 	}
+	return nil
+}
+
+// --- Tab management commands ---
+
+type DocsAddTabCmd struct {
+	DocID    string `arg:"" name:"docId" help:"Doc ID"`
+	Title    string `name:"title" help:"Tab title"`
+	Index    int64  `name:"index" help:"Zero-based position within parent" default:"-1"`
+	Parent   string `name:"parent" help:"Parent tab ID (for nesting)"`
+	Emoji    string `name:"emoji" help:"Icon emoji for the tab"`
+}
+
+func (c *DocsAddTabCmd) Run(ctx context.Context, flags *RootFlags) error {
+	u := ui.FromContext(ctx)
+	account, err := requireAccount(flags)
+	if err != nil {
+		return err
+	}
+
+	id := strings.TrimSpace(c.DocID)
+	if id == "" {
+		return usage("empty docId")
+	}
+
+	svc, err := newDocsService(ctx, account)
+	if err != nil {
+		return err
+	}
+
+	props := &docs.TabProperties{}
+	if c.Title != "" {
+		props.Title = c.Title
+	}
+	if c.Index >= 0 {
+		props.Index = c.Index
+		props.ForceSendFields = append(props.ForceSendFields, "Index")
+	}
+	if c.Parent != "" {
+		props.ParentTabId = c.Parent
+	}
+	if c.Emoji != "" {
+		props.IconEmoji = c.Emoji
+	}
+
+	result, err := svc.Documents.BatchUpdate(id, &docs.BatchUpdateDocumentRequest{
+		Requests: []*docs.Request{{
+			AddDocumentTab: &docs.AddDocumentTabRequest{
+				TabProperties: props,
+			},
+		}},
+	}).Context(ctx).Do()
+	if err != nil {
+		if isDocsNotFound(err) {
+			return fmt.Errorf("doc not found or not a Google Doc (id=%s)", id)
+		}
+		return fmt.Errorf("adding tab: %w", err)
+	}
+
+	var tabProps *docs.TabProperties
+	if len(result.Replies) > 0 && result.Replies[0].AddDocumentTab != nil {
+		tabProps = result.Replies[0].AddDocumentTab.TabProperties
+	}
+
+	if outfmt.IsJSON(ctx) {
+		out := map[string]any{"documentId": result.DocumentId}
+		if tabProps != nil {
+			out["tab"] = map[string]any{
+				"id":    tabProps.TabId,
+				"title": tabProps.Title,
+				"index": tabProps.Index,
+			}
+			if tabProps.ParentTabId != "" {
+				out["tab"].(map[string]any)["parentTabId"] = tabProps.ParentTabId
+			}
+		}
+		return outfmt.WriteJSON(ctx, os.Stdout, out)
+	}
+
+	u.Out().Printf("documentId\t%s", result.DocumentId)
+	if tabProps != nil {
+		u.Out().Printf("tabId\t%s", tabProps.TabId)
+		u.Out().Printf("title\t%s", tabProps.Title)
+		u.Out().Printf("index\t%d", tabProps.Index)
+		if tabProps.ParentTabId != "" {
+			u.Out().Printf("parentTabId\t%s", tabProps.ParentTabId)
+		}
+	}
+	return nil
+}
+
+type DocsUpdateTabCmd struct {
+	DocID string `arg:"" name:"docId" help:"Doc ID"`
+	TabID string `arg:"" name:"tabId" help:"Tab ID to update"`
+	Title string `name:"title" help:"New tab title"`
+	Emoji string `name:"emoji" help:"New icon emoji (use empty string to clear)"`
+}
+
+func (c *DocsUpdateTabCmd) Run(ctx context.Context, flags *RootFlags) error {
+	u := ui.FromContext(ctx)
+	account, err := requireAccount(flags)
+	if err != nil {
+		return err
+	}
+
+	id := strings.TrimSpace(c.DocID)
+	if id == "" {
+		return usage("empty docId")
+	}
+	tabID := strings.TrimSpace(c.TabID)
+	if tabID == "" {
+		return usage("empty tabId")
+	}
+
+	if c.Title == "" && c.Emoji == "" {
+		return usage("at least one of --title or --emoji is required")
+	}
+
+	svc, err := newDocsService(ctx, account)
+	if err != nil {
+		return err
+	}
+
+	props := &docs.TabProperties{TabId: tabID}
+	var fields []string
+	if c.Title != "" {
+		props.Title = c.Title
+		fields = append(fields, "title")
+	}
+	if c.Emoji != "" {
+		props.IconEmoji = c.Emoji
+		fields = append(fields, "iconEmoji")
+	}
+
+	_, err = svc.Documents.BatchUpdate(id, &docs.BatchUpdateDocumentRequest{
+		Requests: []*docs.Request{{
+			UpdateDocumentTabProperties: &docs.UpdateDocumentTabPropertiesRequest{
+				TabProperties: props,
+				Fields:        strings.Join(fields, ","),
+			},
+		}},
+	}).Context(ctx).Do()
+	if err != nil {
+		if isDocsNotFound(err) {
+			return fmt.Errorf("doc not found or not a Google Doc (id=%s)", id)
+		}
+		return fmt.Errorf("updating tab: %w", err)
+	}
+
+	if outfmt.IsJSON(ctx) {
+		out := map[string]any{
+			"documentId": id,
+			"tabId":      tabID,
+			"updated":    fields,
+		}
+		return outfmt.WriteJSON(ctx, os.Stdout, out)
+	}
+
+	u.Out().Printf("documentId\t%s", id)
+	u.Out().Printf("tabId\t%s", tabID)
+	u.Out().Printf("updated\t%s", strings.Join(fields, ", "))
+	return nil
+}
+
+type DocsDeleteTabCmd struct {
+	DocID string `arg:"" name:"docId" help:"Doc ID"`
+	TabID string `arg:"" name:"tabId" help:"Tab ID to delete"`
+}
+
+func (c *DocsDeleteTabCmd) Run(ctx context.Context, flags *RootFlags) error {
+	u := ui.FromContext(ctx)
+	account, err := requireAccount(flags)
+	if err != nil {
+		return err
+	}
+
+	id := strings.TrimSpace(c.DocID)
+	if id == "" {
+		return usage("empty docId")
+	}
+	tabID := strings.TrimSpace(c.TabID)
+	if tabID == "" {
+		return usage("empty tabId")
+	}
+
+	if err := confirmDestructive(ctx, flags, "delete tab "+tabID); err != nil {
+		return err
+	}
+
+	svc, err := newDocsService(ctx, account)
+	if err != nil {
+		return err
+	}
+
+	_, err = svc.Documents.BatchUpdate(id, &docs.BatchUpdateDocumentRequest{
+		Requests: []*docs.Request{{
+			DeleteTab: &docs.DeleteTabRequest{
+				TabId: tabID,
+			},
+		}},
+	}).Context(ctx).Do()
+	if err != nil {
+		if isDocsNotFound(err) {
+			return fmt.Errorf("doc not found or not a Google Doc (id=%s)", id)
+		}
+		return fmt.Errorf("deleting tab: %w", err)
+	}
+
+	if outfmt.IsJSON(ctx) {
+		return outfmt.WriteJSON(ctx, os.Stdout, map[string]any{
+			"documentId": id,
+			"tabId":      tabID,
+			"deleted":    true,
+		})
+	}
+
+	u.Out().Printf("documentId\t%s", id)
+	u.Out().Printf("tabId\t%s", tabID)
+	u.Out().Printf("deleted\ttrue")
 	return nil
 }
 

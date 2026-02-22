@@ -180,6 +180,197 @@ func TestDocsDelete_SendsExpectedRequest(t *testing.T) {
 	}
 }
 
+func TestDocsAddTab_SendsExpectedRequest(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	var got docs.BatchUpdateDocumentRequest
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchUpdate") {
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode batchUpdate: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"documentId": "doc1",
+				"replies": []any{map[string]any{
+					"addDocumentTab": map[string]any{
+						"tabProperties": map[string]any{
+							"tabId": "t.new",
+							"title": "Notes",
+							"index": 1,
+						},
+					},
+				}},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com"}
+	cmd := &DocsAddTabCmd{}
+	if err := runKong(t, cmd, []string{"doc1", "--title", "Notes", "--index", "1"}, newDocsCmdContext(t), flags); err != nil {
+		t.Fatalf("docs add-tab: %v", err)
+	}
+
+	if len(got.Requests) != 1 || got.Requests[0].AddDocumentTab == nil {
+		t.Fatalf("unexpected request payload: %#v", got.Requests)
+	}
+	req := got.Requests[0].AddDocumentTab
+	if req.TabProperties == nil || req.TabProperties.Title != "Notes" {
+		t.Fatalf("unexpected tab properties: %#v", req.TabProperties)
+	}
+}
+
+func TestDocsAddTab_WithParentAndEmoji(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	var got docs.BatchUpdateDocumentRequest
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchUpdate") {
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode batchUpdate: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"documentId": "doc1",
+				"replies": []any{map[string]any{
+					"addDocumentTab": map[string]any{
+						"tabProperties": map[string]any{
+							"tabId":       "t.child",
+							"title":       "Sub Tab",
+							"index":       0,
+							"parentTabId": "t.parent",
+						},
+					},
+				}},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com"}
+	cmd := &DocsAddTabCmd{}
+	if err := runKong(t, cmd, []string{"doc1", "--title", "Sub Tab", "--parent", "t.parent", "--emoji", "📝"}, newDocsCmdContext(t), flags); err != nil {
+		t.Fatalf("docs add-tab: %v", err)
+	}
+
+	if len(got.Requests) != 1 || got.Requests[0].AddDocumentTab == nil {
+		t.Fatalf("unexpected request payload: %#v", got.Requests)
+	}
+	props := got.Requests[0].AddDocumentTab.TabProperties
+	if props == nil {
+		t.Fatal("expected tab properties")
+	}
+	if props.Title != "Sub Tab" {
+		t.Fatalf("expected title 'Sub Tab', got %q", props.Title)
+	}
+	if props.ParentTabId != "t.parent" {
+		t.Fatalf("expected parentTabId 't.parent', got %q", props.ParentTabId)
+	}
+	if props.IconEmoji != "📝" {
+		t.Fatalf("expected emoji '📝', got %q", props.IconEmoji)
+	}
+}
+
+func TestDocsUpdateTab_SendsExpectedRequest(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	var got docs.BatchUpdateDocumentRequest
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchUpdate") {
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode batchUpdate: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"documentId": "doc1"})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com"}
+	cmd := &DocsUpdateTabCmd{}
+	if err := runKong(t, cmd, []string{"doc1", "t.abc", "--title", "Renamed"}, newDocsCmdContext(t), flags); err != nil {
+		t.Fatalf("docs update-tab: %v", err)
+	}
+
+	if len(got.Requests) != 1 || got.Requests[0].UpdateDocumentTabProperties == nil {
+		t.Fatalf("unexpected request payload: %#v", got.Requests)
+	}
+	req := got.Requests[0].UpdateDocumentTabProperties
+	if req.TabProperties == nil || req.TabProperties.TabId != "t.abc" || req.TabProperties.Title != "Renamed" {
+		t.Fatalf("unexpected update payload: %#v", req.TabProperties)
+	}
+	if req.Fields != "title" {
+		t.Fatalf("expected fields 'title', got %q", req.Fields)
+	}
+}
+
+func TestDocsUpdateTab_RequiresFlag(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com"}
+	cmd := &DocsUpdateTabCmd{}
+	err := runKong(t, cmd, []string{"doc1", "t.abc"}, newDocsCmdContext(t), flags)
+	if err == nil {
+		t.Fatal("expected error when no flags provided")
+	}
+	if !strings.Contains(err.Error(), "--title or --emoji") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDocsDeleteTab_SendsExpectedRequest(t *testing.T) {
+	origDocs := newDocsService
+	t.Cleanup(func() { newDocsService = origDocs })
+
+	var got docs.BatchUpdateDocumentRequest
+	docSvc, cleanup := newDocsServiceForTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchUpdate") {
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode batchUpdate: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"documentId": "doc1"})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	defer cleanup()
+	newDocsService = func(context.Context, string) (*docs.Service, error) { return docSvc, nil }
+
+	flags := &RootFlags{Account: "a@b.com", Force: true}
+	cmd := &DocsDeleteTabCmd{}
+	if err := runKong(t, cmd, []string{"doc1", "t.abc"}, newDocsCmdContext(t), flags); err != nil {
+		t.Fatalf("docs delete-tab: %v", err)
+	}
+
+	if len(got.Requests) != 1 || got.Requests[0].DeleteTab == nil {
+		t.Fatalf("unexpected request payload: %#v", got.Requests)
+	}
+	if got.Requests[0].DeleteTab.TabId != "t.abc" {
+		t.Fatalf("unexpected tab ID: %q", got.Requests[0].DeleteTab.TabId)
+	}
+}
+
 func TestDocsFindReplace_SendsExpectedRequest(t *testing.T) {
 	origDocs := newDocsService
 	t.Cleanup(func() { newDocsService = origDocs })
